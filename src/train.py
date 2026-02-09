@@ -1,28 +1,19 @@
-print("🔥 train.py started (FAST MODE - STABLE VERSION)")
-
 import json
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, f1_score
 
-from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-    Trainer,
-    TrainingArguments
-)
-
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
 from datasets import Dataset
 
-# ---------------- CONFIG ----------------
+
 MODEL_NAME = "distilbert-base-uncased"
+DATA_PATH = "data/news.json"
 MAX_LEN = 64
 BATCH_SIZE = 32
-EPOCHS = 1                  # fast + stable
-DATA_PATH = "data/news.json"
+EPOCHS = 1
 SAMPLE_SIZE = 20000
-# --------------------------------------
 
 
 def load_data(path):
@@ -36,16 +27,8 @@ def load_data(path):
 
 
 def preprocess(df):
-    if df.empty:
-        raise ValueError("Dataset is empty")
-
-    df.columns = [c.strip().lower() for c in df.columns]
-    print("🧾 Available columns:", df.columns.tolist())
-
-    df["text"] = (
-        df["headline"].fillna("") + " " + df["short_description"].fillna("")
-    )
-
+    df.columns = [c.lower() for c in df.columns]
+    df["text"] = df["headline"].fillna("") + " " + df["short_description"].fillna("")
     return df[["text", "category"]]
 
 
@@ -67,64 +50,56 @@ def compute_metrics(pred):
     }
 
 
-if __name__ == "__main__":
+df = load_data(DATA_PATH)
+df = preprocess(df)
+df = df.sample(n=SAMPLE_SIZE, random_state=42)
 
-    df = load_data(DATA_PATH)
-    df = preprocess(df)
+label_encoder = LabelEncoder()
+df["label"] = label_encoder.fit_transform(df["category"])
 
-    # FAST MODE
-    df = df.sample(n=SAMPLE_SIZE, random_state=42)
-    print(f"🚀 Using {len(df)} samples for training")
+train_df, val_df = train_test_split(
+    df,
+    test_size=0.2,
+    stratify=df["label"],
+    random_state=42
+)
 
-    label_encoder = LabelEncoder()
-    df["label"] = label_encoder.fit_transform(df["category"])
+train_ds = Dataset.from_pandas(train_df)
+val_ds = Dataset.from_pandas(val_df)
 
-    train_df, val_df = train_test_split(
-        df,
-        test_size=0.2,
-        stratify=df["label"],
-        random_state=42
-    )
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    train_ds = Dataset.from_pandas(train_df)
-    val_ds = Dataset.from_pandas(val_df)
+train_ds = train_ds.map(tokenize, batched=True)
+val_ds = val_ds.map(tokenize, batched=True)
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+train_ds.set_format("torch", columns=["input_ids", "attention_mask", "label"])
+val_ds.set_format("torch", columns=["input_ids", "attention_mask", "label"])
 
-    train_ds = train_ds.map(tokenize, batched=True)
-    val_ds = val_ds.map(tokenize, batched=True)
+model = AutoModelForSequenceClassification.from_pretrained(
+    MODEL_NAME,
+    num_labels=len(label_encoder.classes_)
+)
 
-    train_ds.set_format("torch", columns=["input_ids", "attention_mask", "label"])
-    val_ds.set_format("torch", columns=["input_ids", "attention_mask", "label"])
+args = TrainingArguments(
+    output_dir="results",
+    per_device_train_batch_size=BATCH_SIZE,
+    per_device_eval_batch_size=BATCH_SIZE,
+    num_train_epochs=EPOCHS,
+    learning_rate=2e-5,
+    weight_decay=0.01,
+    logging_dir="logs"
+)
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_NAME,
-        num_labels=len(label_encoder.classes_)
-    )
+trainer = Trainer(
+    model=model,
+    args=args,
+    train_dataset=train_ds,
+    eval_dataset=val_ds,
+    compute_metrics=compute_metrics
+)
 
-    args = TrainingArguments(
-        output_dir="results",
-        per_device_train_batch_size=BATCH_SIZE,
-        per_device_eval_batch_size=BATCH_SIZE,
-        num_train_epochs=EPOCHS,
-        learning_rate=2e-5,
-        weight_decay=0.01,
-        logging_dir="logs"
-    )
+trainer.train()
+trainer.evaluate()
 
-    trainer = Trainer(
-        model=model,
-        args=args,
-        train_dataset=train_ds,
-        eval_dataset=val_ds,
-        compute_metrics=compute_metrics
-    )
-
-    trainer.train()
-    metrics = trainer.evaluate()
-
-    model.save_pretrained("model")
-    tokenizer.save_pretrained("model")
-
-    print("✅ Training complete.")
-    print("📊 Evaluation Metrics:", metrics)
+model.save_pretrained("model")
+tokenizer.save_pretrained("model")
